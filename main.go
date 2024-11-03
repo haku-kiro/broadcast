@@ -5,27 +5,19 @@ import (
 	"log"
 	"sync"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type Container struct {
 	mu   sync.Mutex
-	data mapset.Set[int]
+	data []any
 }
 
-func (c *Container) addData(data int) {
+func (c *Container) addData(data any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.data.Add(data)
-}
-
-func (c *Container) addDataSlice(data []int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.data.Append(data...)
+	c.data = append(c.data, data)
 }
 
 func main() {
@@ -43,13 +35,12 @@ func main() {
 			return err
 		}
 
-		message := body["message"].(int)
+		message := body["message"]
 		container.addData(message)
 
-		data := container.data.ToSlice()
 		sharedResponse := map[string]any{
-			"type": "shared_data",
-			"data": data,
+			"type":    "shared_data",
+			"message": message,
 		}
 
 		for _, node := range n.NodeIDs() {
@@ -74,8 +65,8 @@ func main() {
 			return err
 		}
 
-		data := body["data"].([]int)
-		container.addDataSlice(data)
+		message := body["message"]
+		container.addData(message)
 
 		return nil
 	})
