@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"errors"
+	"log/slog"
+	"os"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -22,6 +24,13 @@ func (c *Container) addData(data any) {
 
 func main() {
 	var container = Container{}
+	logFile, err := os.OpenFile("log.json", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+	if err != nil {
+		panic(err)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(logFile, nil))
+	slog.SetDefault(logger)
 
 	n := maelstrom.NewNode()
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
@@ -38,11 +47,23 @@ func main() {
 			"message": message,
 		}
 
+		slog.Info("broadcast to all nodes")
 		for _, node := range n.NodeIDs() {
 			if node == n.ID() {
 				continue
 			}
-			n.Send(node, sharedResponse)
+
+			n.RPC(node, sharedResponse, func(msg maelstrom.Message) error {
+				var response map[string]any
+				if err := json.Unmarshal(msg.Body, &response); err != nil {
+					return err
+				}
+
+				if msg.Type() == "shared_data_ok" {
+					return errors.New("unexpected response")
+				}
+				return nil
+			})
 		}
 
 		response := map[string]any{
@@ -61,7 +82,9 @@ func main() {
 		message := body["message"]
 		container.addData(message)
 
-		return nil
+		body["type"] = "shared_data_ok"
+
+		return n.Reply(msg, body)
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
@@ -82,6 +105,6 @@ func main() {
 	})
 
 	if err := n.Run(); err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
 	}
 }
