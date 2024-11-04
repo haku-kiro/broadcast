@@ -7,6 +7,10 @@ build:
 test: build
 	maelstrom test -w broadcast --bin ~/go/bin/broadcast --node-count 1 --time-limit 20 --rate 10
 
+quick-test: build
+	# Testing by creating a network partition
+	maelstrom test -w broadcast --bin ~/go/bin/broadcast --node-count 2 --time-limit 10 --rate 10 --nemesis partition
+
 test-multi-node: build
 	maelstrom test -w broadcast --bin ~/go/bin/broadcast --node-count 5 --time-limit 30 --rate 20
 
