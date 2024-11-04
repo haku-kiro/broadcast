@@ -12,10 +12,10 @@ import (
 
 type Container struct {
 	mu   sync.Mutex
-	data []any
+	data []int
 }
 
-func (c *Container) addData(data any) {
+func (c *Container) addData(data int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -34,14 +34,16 @@ func main() {
 
 	n := maelstrom.NewNode()
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
+		// unmarshal the body to get the message data
 		var body map[string]any
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
 
-		message := body["message"]
-		container.addData(message)
+		message := body["message"].(float64)
+		container.addData(int(message))
 
+		// Create the sharedResponse to then send the data to other nodes
 		sharedResponse := map[string]any{
 			"type":    "shared_data",
 			"message": message,
@@ -59,7 +61,7 @@ func main() {
 					return err
 				}
 
-				if msg.Type() == "shared_data_ok" {
+				if msg.Type() != "shared_data_ok" {
 					return errors.New("unexpected response")
 				}
 				return nil
@@ -79,8 +81,8 @@ func main() {
 			return err
 		}
 
-		message := body["message"]
-		container.addData(message)
+		message := body["message"].(float64)
+		container.addData(int(message))
 
 		body["type"] = "shared_data_ok"
 
