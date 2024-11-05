@@ -28,39 +28,31 @@ func (s *server) getIds() []int {
 	return keys
 }
 
-func (s *server) addId(d int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.data[d] = struct{}{}
-}
-
 func (s *server) broadcastHandler(msg maelstrom.Message) error {
+	response := map[string]any{
+		"type": "broadcast_ok",
+	}
+
 	var body map[string]any
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
 		return err
 	}
 
 	message := int(body["message"].(float64))
-	s.addId(message)
-
-	sharedResponse := map[string]any{
-		"type":    "shared_data",
-		"message": message,
+	s.mu.Lock()
+	if _, exists := s.data[message]; exists {
+		s.mu.Unlock()
+		return nil
 	}
+	s.data[message] = struct{}{}
+	s.mu.Unlock()
 
 	for _, node := range s.node.NodeIDs() {
 		if node == s.nodeId {
 			continue
 		}
 
-		s.node.RPC(node, sharedResponse, func(msg maelstrom.Message) error {
-			return nil
-		})
-	}
-
-	response := map[string]any{
-		"type": "broadcast_ok",
+		s.node.Send(node, body)
 	}
 
 	return s.node.Reply(msg, response)
@@ -81,20 +73,6 @@ func (s *server) topologyHandler(msg maelstrom.Message) error {
 	})
 }
 
-func (s *server) shareDataHandler(msg maelstrom.Message) error {
-	var body map[string]any
-	if err := json.Unmarshal(msg.Body, &body); err != nil {
-		return err
-	}
-
-	data := int(body["message"].(float64))
-	s.addId(data)
-
-	body["type"] = "shared_data_ok"
-
-	return s.node.Reply(msg, body)
-}
-
 func NewServer(n *maelstrom.Node) *server {
 	return &server{
 		nodeId: n.ID(),
@@ -111,7 +89,6 @@ func main() {
 	n.Handle("broadcast", server.broadcastHandler)
 	n.Handle("read", server.readHandler)
 	n.Handle("topology", server.topologyHandler)
-	n.Handle("shared_data", server.shareDataHandler)
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
