@@ -2,87 +2,101 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
-	"os"
+	"log"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-type Container struct {
+type server struct {
+	nodeId string
+	node   *maelstrom.Node
+
 	mu   sync.Mutex
-	data []int
+	data map[int]struct{}
 }
 
-func (c *Container) addData(data int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *server) getIds() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	c.data = append(c.data, data)
+	keys := make([]int, 0, len(s.data))
+	for k := range s.data {
+		keys = append(keys, k)
+	}
+
+	return keys
 }
 
-func (c *Container) getSlice() []int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *server) addId(d int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return c.data
+	s.data[d] = struct{}{}
 }
 
-func NewContainer() *Container {
-	return &Container{
-		mu:   sync.Mutex{},
-		data: make([]int, 0),
+func (s *server) broadcastHandler(msg maelstrom.Message) error {
+	var body map[string]any
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return err
+	}
+
+	message := int(body["message"].(float64))
+	s.addId(message)
+
+	sharedResponse := map[string]any{
+		"type":    "shared_data",
+		"message": message,
+	}
+
+	for _, node := range s.node.NodeIDs() {
+		if node == s.nodeId {
+			continue
+		}
+
+		s.node.RPC(node, sharedResponse, func(msg maelstrom.Message) error {
+			return nil
+		})
+	}
+
+	response := map[string]any{
+		"type": "broadcast_ok",
+	}
+
+	return s.node.Reply(msg, response)
+}
+
+func (s *server) readHandler(msg maelstrom.Message) error {
+	response := map[string]any{
+		"type":     "read_ok",
+		"messages": s.getIds(),
+	}
+
+	return s.node.Reply(msg, response)
+}
+
+func (s *server) topologyHandler(msg maelstrom.Message) error {
+	return s.node.Reply(msg, map[string]any{
+		"type": "topology_ok",
+	})
+}
+
+func NewServer(n *maelstrom.Node) *server {
+	return &server{
+		nodeId: n.ID(),
+		node:   n,
+		mu:     sync.Mutex{},
+		data:   make(map[int]struct{}),
 	}
 }
 
 func main() {
-	var container = NewContainer()
-	logFile, err := os.OpenFile("log.json", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
-	if err != nil {
-		panic(err)
-	}
-
-	logger := slog.New(slog.NewJSONHandler(logFile, nil))
-	slog.SetDefault(logger)
-
 	n := maelstrom.NewNode()
-	n.Handle("broadcast", func(msg maelstrom.Message) error {
-		// unmarshal the body to get the message data
-		var body map[string]any
-		if err := json.Unmarshal(msg.Body, &body); err != nil {
-			return err
-		}
+	server := NewServer(n)
 
-		message := body["message"].(float64)
-
-		d := int(message)
-		container.addData(d)
-
-		// Create the sharedResponse to then send the data to other nodes
-		// Sending all of the data to each node after getting a new element,
-		// Should look to only do this when there is a network issue.
-		sharedResponse := map[string]any{
-			"type":    "shared_data",
-			"message": d,
-		}
-
-		slog.Info("broadcast to all nodes except yourself")
-		for _, node := range n.NodeIDs() {
-			if node == n.ID() {
-				continue
-			}
-
-			n.RPC(node, sharedResponse, func(msg maelstrom.Message) error {
-				return nil
-			})
-		}
-
-		response := map[string]any{
-			"type": "broadcast_ok",
-		}
-
-		return n.Reply(msg, response)
-	})
+	n.Handle("broadcast", server.broadcastHandler)
+	n.Handle("read", server.readHandler)
+	n.Handle("topology", server.topologyHandler)
 
 	n.Handle("shared_data", func(msg maelstrom.Message) error {
 		var body map[string]any
@@ -90,32 +104,15 @@ func main() {
 			return err
 		}
 
-		data := body["message"].(float64)
-		container.addData(int(data))
+		data := int(body["message"].(float64))
+		server.addId(data)
 
 		body["type"] = "shared_data_ok"
 
 		return n.Reply(msg, body)
 	})
 
-	n.Handle("read", func(msg maelstrom.Message) error {
-		response := map[string]any{
-			"type":     "read_ok",
-			"messages": container.getSlice(),
-		}
-
-		return n.Reply(msg, response)
-	})
-
-	n.Handle("topology", func(msg maelstrom.Message) error {
-		response := map[string]any{
-			"type": "topology_ok",
-		}
-
-		return n.Reply(msg, response)
-	})
-
 	if err := n.Run(); err != nil {
-		slog.Error(err.Error())
+		log.Fatal(err)
 	}
 }
