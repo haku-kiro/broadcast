@@ -2,28 +2,42 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"os"
 	"sync"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type Container struct {
 	mu   sync.Mutex
-	data []int
+	data mapset.Set[int]
 }
 
 func (c *Container) addData(data int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.data = append(c.data, data)
+	c.data.Add(data)
+}
+
+func (c *Container) getSlice() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.data.ToSlice()
+}
+
+func NewContainer() *Container {
+	return &Container{
+		mu:   sync.Mutex{},
+		data: mapset.NewSet[int](),
+	}
 }
 
 func main() {
-	var container = Container{}
+	var container = NewContainer()
 	logFile, err := os.OpenFile("log.json", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
 	if err != nil {
 		panic(err)
@@ -41,29 +55,25 @@ func main() {
 		}
 
 		message := body["message"].(float64)
-		container.addData(int(message))
+
+		d := int(message)
+		container.addData(d)
 
 		// Create the sharedResponse to then send the data to other nodes
+		// Sending all of the data to each node after getting a new element,
+		// Should look to only do this when there is a network issue.
 		sharedResponse := map[string]any{
 			"type":    "shared_data",
-			"message": message,
+			"message": d,
 		}
 
-		slog.Info("broadcast to all nodes")
+		slog.Info("broadcast to all nodes except yourself")
 		for _, node := range n.NodeIDs() {
 			if node == n.ID() {
 				continue
 			}
 
 			n.RPC(node, sharedResponse, func(msg maelstrom.Message) error {
-				var response map[string]any
-				if err := json.Unmarshal(msg.Body, &response); err != nil {
-					return err
-				}
-
-				if msg.Type() != "shared_data_ok" {
-					return errors.New("unexpected response")
-				}
 				return nil
 			})
 		}
@@ -81,8 +91,8 @@ func main() {
 			return err
 		}
 
-		message := body["message"].(float64)
-		container.addData(int(message))
+		data := body["message"].(int)
+		container.addData(data)
 
 		body["type"] = "shared_data_ok"
 
@@ -92,7 +102,7 @@ func main() {
 	n.Handle("read", func(msg maelstrom.Message) error {
 		response := map[string]any{
 			"type":     "read_ok",
-			"messages": container.data,
+			"messages": container.getSlice(),
 		}
 
 		return n.Reply(msg, response)
