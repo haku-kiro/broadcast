@@ -12,13 +12,13 @@ type server struct {
 	nodeId string
 	node   *maelstrom.Node
 
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	data map[int]struct{}
 }
 
 func (s *server) getIds() []int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	keys := make([]int, 0, len(s.data))
 	for k := range s.data {
@@ -81,11 +81,25 @@ func (s *server) topologyHandler(msg maelstrom.Message) error {
 	})
 }
 
+func (s *server) shareDataHandler(msg maelstrom.Message) error {
+	var body map[string]any
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return err
+	}
+
+	data := int(body["message"].(float64))
+	s.addId(data)
+
+	body["type"] = "shared_data_ok"
+
+	return s.node.Reply(msg, body)
+}
+
 func NewServer(n *maelstrom.Node) *server {
 	return &server{
 		nodeId: n.ID(),
 		node:   n,
-		mu:     sync.Mutex{},
+		mu:     sync.RWMutex{},
 		data:   make(map[int]struct{}),
 	}
 }
@@ -97,20 +111,7 @@ func main() {
 	n.Handle("broadcast", server.broadcastHandler)
 	n.Handle("read", server.readHandler)
 	n.Handle("topology", server.topologyHandler)
-
-	n.Handle("shared_data", func(msg maelstrom.Message) error {
-		var body map[string]any
-		if err := json.Unmarshal(msg.Body, &body); err != nil {
-			return err
-		}
-
-		data := int(body["message"].(float64))
-		server.addId(data)
-
-		body["type"] = "shared_data_ok"
-
-		return n.Reply(msg, body)
-	})
+	n.Handle("shared_data", server.shareDataHandler)
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
