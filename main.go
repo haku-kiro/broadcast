@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -8,9 +9,56 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
+type message struct {
+	destination string
+	body        map[string]any
+}
+
+type retry struct {
+	cancel context.CancelFunc
+	ch     chan message
+}
+
+func (r *retry) action(msg message) {
+	r.ch <- msg
+}
+
+func (r *retry) close() {
+	r.cancel()
+}
+
+func newRetry(n *maelstrom.Node, tries int) *retry {
+	ch := make(chan message)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	for i := 0; i < tries; i++ {
+		go func() {
+			for {
+				select {
+				case msg := <-ch:
+					for {
+						if err := n.Send(msg.destination, msg.body); err != nil {
+							continue
+						}
+						break
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	return &retry{
+		ch:     ch,
+		cancel: cancel,
+	}
+}
+
 type server struct {
 	nodeId string
 	node   *maelstrom.Node
+	r      *retry
 
 	mu   sync.RWMutex
 	data map[int]struct{}
@@ -29,22 +77,18 @@ func (s *server) getIds() []int {
 }
 
 func (s *server) broadcastHandler(msg maelstrom.Message) error {
-	response := map[string]any{
-		"type": "broadcast_ok",
-	}
-
 	var body map[string]any
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
 		return err
 	}
 
-	message := int(body["message"].(float64))
+	id := int(body["message"].(float64))
 	s.mu.Lock()
-	if _, exists := s.data[message]; exists {
+	if _, exists := s.data[id]; exists {
 		s.mu.Unlock()
 		return nil
 	}
-	s.data[message] = struct{}{}
+	s.data[id] = struct{}{}
 	s.mu.Unlock()
 
 	for _, node := range s.node.NodeIDs() {
@@ -52,10 +96,15 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 			continue
 		}
 
-		s.node.Send(node, body)
+		s.r.action(message{
+			destination: node,
+			body:        body,
+		})
 	}
 
-	return s.node.Reply(msg, response)
+	return s.node.Reply(msg, map[string]any{
+		"type": "broadcast_ok",
+	})
 }
 
 func (s *server) readHandler(msg maelstrom.Message) error {
@@ -73,18 +122,22 @@ func (s *server) topologyHandler(msg maelstrom.Message) error {
 	})
 }
 
-func NewServer(n *maelstrom.Node) *server {
+func NewServer(n *maelstrom.Node, r *retry) *server {
 	return &server{
 		nodeId: n.ID(),
 		node:   n,
 		mu:     sync.RWMutex{},
+		r:      r,
 		data:   make(map[int]struct{}),
 	}
 }
 
 func main() {
 	n := maelstrom.NewNode()
-	server := NewServer(n)
+	r := newRetry(n, 10)
+	defer r.close()
+
+	server := NewServer(n, r)
 
 	n.Handle("broadcast", server.broadcastHandler)
 	n.Handle("read", server.readHandler)
