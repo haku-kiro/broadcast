@@ -6,33 +6,32 @@ import (
 	"os"
 	"sync"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type Container struct {
 	mu   sync.Mutex
-	data mapset.Set[int]
+	data []int
 }
 
 func (c *Container) addData(data int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.data.Add(data)
+	c.data = append(c.data, data)
 }
 
 func (c *Container) getSlice() []int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.data.ToSlice()
+	return c.data
 }
 
 func NewContainer() *Container {
 	return &Container{
 		mu:   sync.Mutex{},
-		data: mapset.NewSet[int](),
+		data: make([]int, 0),
 	}
 }
 
@@ -91,8 +90,8 @@ func main() {
 			return err
 		}
 
-		data := body["message"].(int)
-		container.addData(data)
+		data := body["message"].(float64)
+		container.addData(int(data))
 
 		body["type"] = "shared_data_ok"
 
