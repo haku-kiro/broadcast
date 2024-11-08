@@ -31,6 +31,9 @@ test-fault-tolerance: build clear-logs
 test-efficiency-a: build clear-logs
 	maelstrom test -w broadcast --bin ~/go/bin/broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100
 
+test-efficiency-b: build clear-logs
+	maelstrom test -w broadcast --bin ~/go/bin/broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100 --nemesis partition
+
 # Starts up the maelstrom server which shows detailed results.
 results:
 	maelstrom serve
