@@ -12,56 +12,16 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
+const maxRetries = 100
+
 type message struct {
 	destination string
 	body        map[string]any
 }
 
-type retry struct {
-	cancel context.CancelFunc
-	ch     chan message
-}
-
-func (r *retry) action(msg message) {
-	r.ch <- msg
-}
-
-func (r *retry) close() {
-	r.cancel()
-}
-
-func newRetry(n *maelstrom.Node, tries int) *retry {
-	ch := make(chan message)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	for i := 0; i < tries; i++ {
-		go func() {
-			for {
-				select {
-				case msg := <-ch:
-					for {
-						if err := n.Send(msg.destination, msg.body); err != nil {
-							continue
-						}
-						break
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	return &retry{
-		ch:     ch,
-		cancel: cancel,
-	}
-}
-
 type server struct {
 	nodeId  string
 	node    *maelstrom.Node
-	r       *retry
 	context context.Context
 
 	mu   sync.RWMutex
@@ -106,7 +66,7 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 		err := s.syncRPC(node, body)
 		if err != nil {
 			slog.Error("error when trying to broadcast to other nodes going into retry", "error", err)
-			for i := 0; i < 10; i++ {
+			for i := 0; i < maxRetries; i++ {
 				if err := s.syncRPC(node, body); err != nil {
 					time.Sleep(time.Duration(i) * time.Second)
 					continue
@@ -115,11 +75,6 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 			}
 			return err
 		}
-
-		// s.r.action(message{
-		// 	destination: node,
-		// 	body:        body,
-		// })
 	}
 
 	return s.node.Reply(msg, map[string]any{
@@ -155,13 +110,12 @@ func (s *server) topologyHandler(msg maelstrom.Message) error {
 	})
 }
 
-func NewServer(n *maelstrom.Node, r *retry) *server {
+func NewServer(n *maelstrom.Node) *server {
 	return &server{
 		nodeId:  n.ID(),
 		node:    n,
 		mu:      sync.RWMutex{},
 		context: context.Background(),
-		r:       r,
 		data:    make(map[int]struct{}),
 	}
 }
@@ -177,11 +131,9 @@ func main() {
 
 	slog.Info("creating node")
 	n := maelstrom.NewNode()
-	r := newRetry(n, 10)
-	defer r.close()
 
 	slog.Info("creating server")
-	server := NewServer(n, r)
+	server := NewServer(n)
 
 	slog.Info("adding handlers")
 	n.Handle("broadcast", server.broadcastHandler)
