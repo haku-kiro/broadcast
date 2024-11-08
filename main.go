@@ -40,6 +40,17 @@ func (s *server) getIds() []int {
 	return keys
 }
 
+func (s *server) addId(id int) {
+	if _, exists := s.data[id]; exists {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data[id] = struct{}{}
+}
+
 func (s *server) broadcastHandler(msg maelstrom.Message) error {
 	var body map[string]any
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
@@ -47,15 +58,11 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 	}
 
 	id := int(body["message"].(float64))
-	s.mu.Lock()
-	if _, exists := s.data[id]; exists {
-		s.mu.Unlock()
-		return nil
-	}
-	s.data[id] = struct{}{}
-	s.mu.Unlock()
+	s.addId(id)
 
 	slog.Info("sending to all nodes")
+
+	body["type"] = "shared_data"
 	for _, node := range s.node.NodeIDs() {
 		if node == s.nodeId {
 			continue
@@ -73,7 +80,6 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 				}
 				break
 			}
-			return err
 		}
 	}
 
@@ -83,7 +89,7 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 }
 
 func (s *server) syncRPC(dst string, body map[string]any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	_, err := s.node.SyncRPC(ctx, dst, body)
 	return err
@@ -107,6 +113,20 @@ func (s *server) initHandler(_ maelstrom.Message) error {
 func (s *server) topologyHandler(msg maelstrom.Message) error {
 	return s.node.Reply(msg, map[string]any{
 		"type": "topology_ok",
+	})
+}
+
+func (s *server) sharedDataHandler(msg maelstrom.Message) error {
+	var body map[string]any
+	if err := json.Unmarshal(msg.Body, &body); err != nil {
+		return err
+	}
+
+	id := int(body["message"].(float64))
+	s.addId(id)
+
+	return s.node.Reply(msg, map[string]any{
+		"type": "shared_data_ok",
 	})
 }
 
@@ -140,6 +160,7 @@ func main() {
 	n.Handle("read", server.readHandler)
 	n.Handle("topology", server.topologyHandler)
 	n.Handle("init", server.initHandler)
+	n.Handle("shared_data", server.sharedDataHandler)
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
