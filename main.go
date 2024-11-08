@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -96,18 +97,24 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 
 	slog.Info("sending to all nodes")
 	for _, node := range s.node.NodeIDs() {
-		if node == s.node.ID() {
+		if node == s.nodeId {
 			continue
 		}
 
 		slog.Info("sending to node", "node", node, "from", s.node.ID())
 
-		resultMessage, err := s.node.SyncRPC(s.context, node, msg)
+		err := s.syncRPC(node, body)
 		if err != nil {
-			slog.Error("error when trying to broadcast to other nodes", "error", err)
+			slog.Error("error when trying to broadcast to other nodes going into retry", "error", err)
+			for i := 0; i < 10; i++ {
+				if err := s.syncRPC(node, body); err != nil {
+					time.Sleep(time.Duration(i) * time.Second)
+					continue
+				}
+				break
+			}
 			return err
 		}
-		slog.Info("result message", "data", resultMessage)
 
 		// s.r.action(message{
 		// 	destination: node,
@@ -120,6 +127,13 @@ func (s *server) broadcastHandler(msg maelstrom.Message) error {
 	})
 }
 
+func (s *server) syncRPC(dst string, body map[string]any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := s.node.SyncRPC(ctx, dst, body)
+	return err
+}
+
 func (s *server) readHandler(msg maelstrom.Message) error {
 	response := map[string]any{
 		"type":     "read_ok",
@@ -127,6 +141,12 @@ func (s *server) readHandler(msg maelstrom.Message) error {
 	}
 
 	return s.node.Reply(msg, response)
+}
+
+func (s *server) initHandler(_ maelstrom.Message) error {
+	// ID only becomes valid after init
+	s.nodeId = s.node.ID()
+	return nil
 }
 
 func (s *server) topologyHandler(msg maelstrom.Message) error {
@@ -167,6 +187,7 @@ func main() {
 	n.Handle("broadcast", server.broadcastHandler)
 	n.Handle("read", server.readHandler)
 	n.Handle("topology", server.topologyHandler)
+	n.Handle("init", server.initHandler)
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
